@@ -1,0 +1,284 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[1]:
+
+
+import numpy as np
+from functions import *
+from en_full import *
+import matplotlib.pyplot as plt
+from scipy.sparse.linalg import eigsh,LinearOperator
+
+def mps_to_full_state(psi):
+    temp = []
+    temp.append(np.tensordot(psi[0], np.conjugate(psi[0]),axes = ([0,],[0,])))
+    for i in range(1,len(psi)-1):
+        temp.append(np.tensordot(psi[i], np.conjugate(psi[i]),axes=([0,1],[0,1])))
+  #  temp.append(np.tensordot(psi[len(psi)-1],np.conjugate(psi[len(psi)-1]),axes = ))
+    return temp
+#defining sumation of two lists 
+def sum_list(a,b):
+    a_dim = np.shape(a)
+    b_dim = np.shape(b)
+    s = []
+    if a_dim == b_dim:
+        for i in range(a_dim[0]):
+            for j in range(a_dim[1]):
+                s.append(a[i][j]+b[i][j])
+        s =  np.reshape(s, a_dim)
+        return s
+    else:
+        raise ValueError("Lists have different dimensions")
+# definind operators. Z - sigma_z, X- sigma_x, one - identity matrix
+Z = np.ndarray((2,2),dtype = int ,buffer= np.array([[1,0],
+     [0,-1]]))
+X =np.ndarray((2,2),dtype = int, buffer =  np.array([[0,1],
+     [1,0]]))
+one = np.ndarray((2,2),dtype = int, buffer =np.array( [[1,0],
+       [0,1]]))
+#function for creating hamiltonian as MPO
+def create_Hamiltonian(N,hz,h):
+    H = []
+    #Let us create a hamiltonian. I set N = 6
+    H.append( [sum_list(-hz*Z,-h*X),-Z,one])
+    for i in range(N-2):
+        H.append([[one,np.zeros((2,2)),np.zeros((2,2))],[Z,np.zeros((2,2)),np.zeros((2,2))],[sum_list(-hz*Z,-h*X),-Z,one]])
+    H.append([one,Z,sum_list(-hz*Z,-h*X)])
+    return H
+
+def exp_QTIM(mps, H,j): # j - orthogonality center site
+    #first contraction
+    if j != 0:
+        temp_left = np.einsum('ij,kil,lw->jkw', mps[0],H[0],np.conjugate(mps[0]), optimize = "greedy")
+    else:
+        temp_left = 0
+    for i in range(1,j):
+        temp_left = np.einsum('ijk,iac,jdab,kbe-> cde',temp_left,mps[i],H[i],np.conjugate(mps[i]), optimize = "greedy")         
+    if j != len(mps)-1:
+        temp_right = np.einsum('ij,kjl,wl->ikw',mps[-1],H[-1],np.conjugate(mps[-1]))
+    else:
+        temp_right = 0
+    for i in range(2,len(mps)-j):
+        temp_right = np.einsum('ijk,cai,djab,ebk-> cde',temp_right,mps[-i],H[-i],np.conjugate(mps[-i]), optimize = "greedy")         
+    if j != 0 and j != len(mps)-1:
+        temp_mid = np.einsum('abc,xybw,pwd -> acxypd',mps[j],H[j],np.conjugate(mps[j]))
+    elif j ==0:
+        temp_mid = np.einsum('ij,kil,lw->jkw', mps[0],H[0],np.conjugate(mps[0]), optimize = "greedy")
+    elif j == len(mps)-1:
+        temp_mid = np.einsum('ab,xbd ,cd->axc',mps[len(mps)-1],H[len(mps)-1],np.conjugate(mps[len(mps)-1]))
+    return temp_left,temp_mid,temp_right
+#functions creating hjaj
+def hjAj(x,L,R,H_j): #x - zreshapowana czesc mpsa
+    Dl = np.shape(L)[0]
+    d = np.shape(H_j)[2]
+    Dr = np.shape(R)[0]
+    x = np.reshape(x, (Dl,d,Dr))
+    hj = np.einsum('abc, bxwz, yxp->acwzyp',L,H_j,R)
+    hjaj = np.einsum('acwzyp, awy->czp',hj, x)
+    hjaj = np.reshape(hjaj, (Dl*Dr*d))
+    return hjaj
+def hjAj0(x,R,H_j):
+    d = np.shape(H_j)[2]
+    Dr = np.shape(R)[0]
+    x = np.reshape(x, (d,Dr))
+    hj = np.einsum('abc, xaz->bcxz',H_j,R)
+    hjaj = np.einsum('bcxz, xb-> cz ',hj, x)
+    hjaj = np.reshape(hjaj, (Dr*d))
+    return hjaj
+def hjajEND(x, L, H_j):
+    d = np.shape(H_j)[2]
+    Dl = np.shape(L)[0]
+    x = np.reshape(x, (Dl,d))
+    hj = np.einsum('abc, bug->aucg',L,H_j)
+    hjaj = np.einsum('acug, au->cg',hj,x)
+    return hjaj
+def min_up_Aj(mps_j,L,H_j,R):
+    Dl = np.shape(L)[0]
+    d = np.shape(H_j)[2]
+    Dr = np.shape(R)[0]
+    x = np.reshape(mps_j, (Dl*d*Dr))
+    fa = lambda x : hjAj(x, L,R,H_j)
+    dim = Dl*Dr*d
+    A = LinearOperator((dim,dim),matvec = fa)
+    l,v = eigsh(A,1,which = 'SA')
+    v = np.reshape(v,(Dl,d,Dr))
+    return v
+def sweep_from_left(mps,H,end):
+    L, MID, R = exp_QTIM(mps,H,0)
+    d = np.shape(H[0])[2]
+    Dr = np.shape(R)[0]
+    x = np.reshape(mps[0], (d*Dr))
+    fa = lambda x: hjAj0(x,R,H[0])
+    dim = d*Dr
+    A = LinearOperator((dim,dim), matvec = fa)
+    l,v = eigsh(A,1,which = 'SA')
+    v = np.reshape(v, (d,Dr))
+    #moving orthogonality center
+    left_bs = v.shape
+    right_bs = mps[1]
+    v = np.reshape(v, (-1,left_bs[-1]))
+    q,r = np.linalg.qr(v)
+    mps[0] = np.reshape(q, left_bs)
+    mps[1]= np.einsum('ab,byz->ayz',r,mps[1])
+    for i in range(1,end): #petla bez koncow
+        L ,MID, R = exp_QTIM(mps,H,i)
+        v = min_up_Aj(mps[i],L,H[i],R) #nowy mps[i]
+        #moving orthogonality center
+        left_bs = v.shape
+        right_bs = mps[i+1]
+        v = np.reshape(v, (-1,left_bs[-1]))
+        q,r = np.linalg.qr(v)
+        mps[i] = np.reshape(q, left_bs)
+        if i == end-1:
+            mps[i+1]= np.einsum('ab,by->ay',r,mps[i+1])
+        else:
+            mps[i+1]= np.einsum('ab,byz->ayz',r,mps[i+1])
+    return mps
+
+def sweep_from_right(mps, H,end):
+   # print('end ',end)
+    L, MID, R = exp_QTIM(mps,H,end)
+    d = np.shape(H[end])[2]
+   # print(np.shape(L))
+    Dl = np.shape(L)[0]
+    x = np.reshape(mps[end],(d*Dl))
+    fa = lambda x : hjajEND(x, L, H[end])
+    dim =Dl*d
+    A = LinearOperator((dim,dim),matvec = fa)
+    l,v = eigsh(A, 1, which = 'SA')
+    v = np.reshape(v, (Dl, d))
+    for i in reversed(range(1,end)):
+        L,MID,R = exp_QTIM(mps,H,i)
+        v = min_up_Aj(mps[i],L,H[i],R)
+        #moving orthogonality center
+        left_bs = mps[i-1].shape
+        right_bs = v.shape
+
+        v = np.reshape(mps[i], (left_bs[-1], -1))
+        U, S, V = np.linalg.svd(v,full_matrices=False)
+      #  q,r = np.linalg.qr(v)
+        mps[i] = np.reshape(V, right_bs)
+        us =  mps [i-1] @ U @ np.diag(S)
+        mps[i-1] = np.reshape(us, left_bs)
+        
+    return mps
+def change_orthogonality_center(mps, actual_oc, new_oc):
+    end = np.size(mps) -1
+    if actual_oc < new_oc:
+        for i in range(actual_oc, new_oc):
+            left_bs = mps[i].shape
+            right_bs = mps[i+1].shape
+            v = np.reshape(mps[i], (-1,left_bs[-1]))
+            q,r = np.linalg.qr(v)
+            mps[i] = np.reshape(q, left_bs)
+            if i == end-1:
+                mps[i+1]= np.einsum('ab,by->ay',r,mps[i+1])
+            else:
+                mps[i+1]= np.einsum('ab,byz->ayz',r,mps[i+1])
+    elif new_oc < actual_oc:
+        for i in reversed(range(new_oc, actual_oc)):
+            left_bs = mps[i-1].shape
+            right_bs = mps[i].shape
+            v = np.reshape(mps[i], (left_bs[-1], -1))
+            U, S, V = np.linalg.svd(v,full_matrices=False)
+            mps[i] = np.reshape(V, right_bs)
+            us =  mps [i-1] @ U @ np.diag(S)
+            mps[i-1] = np.reshape(us, left_bs)
+    return mps
+def min_A(x,H,number_of_sweeps):
+    mps =  mix_can(x,0)
+    end = len(np.shape(x))-1
+    L,MID,R = exp_QTIM(mps, H,0)
+    energy_at_the_start = np.einsum('abc,abc',MID,R)
+   # print("Energy at the beginning: ", energy_at_the_start)
+    for num in range(number_of_sweeps):
+        if num%2 != 0:
+            mps = sweep_from_right(mps,H, end)
+            L,MID,R = exp_QTIM(mps, H,0)
+            energy = np.einsum('abc,abc',MID,R)
+        else:
+            mps = sweep_from_left(mps,H,end)
+            L,MID,R = exp_QTIM(mps, H,end)
+            energy = np.einsum('abc,abc',MID,L)
+    #print("Energy at the end: ", energy, "for sweep ", num)
+    if number_of_sweeps%2 == 0:
+        orthogonality_center = 0
+    else:
+        orthogonality_center = end
+    return energy,mps, orthogonality_center
+
+
+# In[2]:
+
+
+#Testing 
+hz = 0
+list_h = [0,0.1,1,10]
+for N in range(3, 7):
+    for h in list_h:
+        H = create_Hamiltonian(N, hz = hz, h = h)
+        x = random(N)
+        sweeps = 1
+        w = en_GS(N,hz = hz,h = h)-min_A(x,H,sweeps)[0]
+       # print("diff ", w)
+        while(abs(w) > 1e-6):
+            sweeps +=1
+            w = en_GS(N,hz = hz,h = h)-min_A(x,H,sweeps)[0]
+            if(sweeps > 10):
+                print("Too much steps")
+                break
+        print("For h = ", h, " and N = ", N, " To achive good minimum we needed ", sweeps," sweeps", )
+        sweeps = 0
+        print("Energy with given function: ", en_GS(N,hz = hz,h = h))
+        print("Energy with my function: ",min_A(x,H,N)[0])
+        print("Difference between this energies: ", w)
+
+
+# In[3]:
+
+
+def MPS_exp_val_1s(psi,op,site):
+    dim = len(psi)
+    if site ==dim-1:
+        temp = np.tensordot(op,psi[site], axes = ([0],[1]))
+        c = complex(np.tensordot(np.conjugate(psi[site]),temp,axes = ([0,1],[1,0])))
+    elif site == 0:
+        temp = np.tensordot(op,psi[site], axes = ([0],[0]))
+        c = complex(np.tensordot(np.conjugate(psi[site]),temp,axes = ([0,1],[0,1])))       
+    else:
+        temp = np.tensordot(op,psi[site], axes = ([0],[1]))
+        c = complex(np.tensordot(np.conjugate(psi[site]),temp,axes = ([0,1,2],[1,0,2])))
+    return c.real
+
+
+# In[4]:
+
+
+#exercise 7
+hz = 1e-3; n = 6
+state = random(n)
+O_list = []
+#for h in list_h:
+for h in np.arange(0.1, 3,0.1):
+    H_O = create_Hamiltonian(n,hz = hz, h=h)
+    e, mps, orthogonality_center = min_A(state,H_O,n)
+    summa = 0
+    for i in range(n):
+        mps = change_orthogonality_center(mps, orthogonality_center, i)
+        summa += MPS_exp_val_1s(mps,Z,i)
+    O = summa/n
+    #print(O, " for ", h)
+    O_list.append(O)
+#print(list_h)
+
+
+# In[5]:
+
+
+plt.plot(np.arange(0.1, 3,0.1),O_list,'o')
+plt.show
+
+
+# In[ ]:
+
