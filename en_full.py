@@ -1,3 +1,5 @@
+#Author: Piotr Czarnik
+
 import numpy as np
 from scipy.sparse.linalg import LinearOperator
 from scipy.sparse.linalg import eigsh
